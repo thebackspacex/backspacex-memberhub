@@ -74,6 +74,7 @@ final class BSXMH_Portal {
         }
 
         $user = wp_get_current_user();
+        $member = BSXMH_Members::get_by_user( (int) $user->ID );
         $display_name = sanitize_text_field( wp_unslash( $_POST['display_name'] ?? '' ) );
         $email = sanitize_email( wp_unslash( $_POST['email'] ?? '' ) );
         if ( ! $display_name || ! is_email( $email ) ) {
@@ -89,17 +90,62 @@ final class BSXMH_Portal {
 
         $phone = sanitize_text_field( wp_unslash( $_POST['phone'] ?? '' ) );
 
-        global $wpdb;
-        $wpdb->update(
-            BSXMH_DB::table( 'members' ),
-            array( 'phone' => $phone ),
-            array( 'user_id' => $user->ID ),
-            array( '%s' ),
-            array( '%d' )
-        );
+        // Phone is stored inside profile_data in current MemberHub schemas.
+        if ( $member ) {
+            global $wpdb;
+            $profile_data = json_decode( (string) ( $member->profile_data ?? '' ), true );
+            $profile_data = is_array( $profile_data ) ? $profile_data : array();
+            $profile_data['phone'] = $phone;
+            $wpdb->update(
+                BSXMH_DB::table( 'members' ),
+                array( 'profile_data' => wp_json_encode( $profile_data ) ),
+                array( 'user_id' => $user->ID ),
+                array( '%s' ),
+                array( '%d' )
+            );
+        }
 
-        // Keep the frontend profile value and the MemberHub member record in sync.
+        // Keep a user-meta fallback for compatibility with older versions.
         update_user_meta( $user->ID, 'bsxmh_phone', $phone );
+        $directory_settings = get_option( 'bsxmh_settings', array() );
+        if ( ! isset( $directory_settings['directory_allow_opt_out'] ) || ! empty( $directory_settings['directory_allow_opt_out'] ) ) {
+            update_user_meta( $user->ID, 'bsxmh_directory_hidden', empty( $_POST['directory_hidden'] ) ? '0' : '1' );
+        }
+
+        $settings = get_option( 'bsxmh_settings', array() );
+        $allow_photo = ! isset( $settings['allow_member_profile_photo'] ) || ! empty( $settings['allow_member_profile_photo'] );
+        if ( $allow_photo && $member ) {
+            if ( ! empty( $_POST['remove_profile_photo'] ) ) {
+                $photo_result = BSXMH_Members::set_profile_photo( (int) $member->id, 0, true );
+                if ( is_wp_error( $photo_result ) ) {
+                    wp_safe_redirect( add_query_arg( 'bsxmh_profile_status', 'photo_failed', $profile_url ) ); exit;
+                }
+            } elseif ( ! empty( $_FILES['profile_photo']['name'] ) ) {
+                $max_mb = max( 1, min( 10, absint( $settings['profile_photo_max_mb'] ?? 2 ) ) );
+                if ( ! empty( $_FILES['profile_photo']['size'] ) && (int) $_FILES['profile_photo']['size'] > $max_mb * MB_IN_BYTES ) {
+                    wp_safe_redirect( add_query_arg( 'bsxmh_profile_status', 'photo_too_large', $profile_url ) ); exit;
+                }
+                require_once ABSPATH . 'wp-admin/includes/file.php';
+                require_once ABSPATH . 'wp-admin/includes/media.php';
+                require_once ABSPATH . 'wp-admin/includes/image.php';
+                $allowed = array( 'jpg|jpeg' => 'image/jpeg', 'png' => 'image/png', 'webp' => 'image/webp' );
+                $attachment_id = media_handle_upload( 'profile_photo', 0, array(), array( 'test_form' => false, 'mimes' => $allowed ) );
+                if ( is_wp_error( $attachment_id ) ) {
+                    set_transient( 'bsxmh_profile_photo_error_' . (int) $user->ID, $attachment_id->get_error_message(), 5 * MINUTE_IN_SECONDS );
+                    wp_safe_redirect( add_query_arg( 'bsxmh_profile_status', 'photo_failed', $profile_url ) ); exit;
+                }
+                $mime = (string) get_post_mime_type( $attachment_id );
+                if ( ! in_array( $mime, array_values( $allowed ), true ) ) {
+                    wp_delete_attachment( $attachment_id, true );
+                    wp_safe_redirect( add_query_arg( 'bsxmh_profile_status', 'photo_type', $profile_url ) ); exit;
+                }
+                $photo_result = BSXMH_Members::set_profile_photo( (int) $member->id, (int) $attachment_id, false );
+                if ( is_wp_error( $photo_result ) ) {
+                    wp_delete_attachment( $attachment_id, true );
+                    wp_safe_redirect( add_query_arg( 'bsxmh_profile_status', 'photo_failed', $profile_url ) ); exit;
+                }
+            }
+        }
 
         // Validate and persist all enabled member-editable custom fields.
         $custom_result = BSXMH_Form_Builder::validate_and_save(
@@ -160,7 +206,13 @@ final class BSXMH_Portal {
             'payment_page_id' => array( 'Member Payment', 'member-payment', '[bsxmh_payment]' ),
             'contribution_page_id' => array( 'Member Contribution', 'member-contribution', '[bsxmh_online_contribution]' ),
             'events_page_id' => array( 'Member Events', 'member-events', '[bsxmh_event_list]' ),
+            'transparency_page_id' => array( 'Transparency Dashboard', 'transparency-dashboard', '[bsxmh_transparency_dashboard]' ),
             'profile_page_id' => array( 'Member Profile', 'member-profile', '[bsxmh_profile]' ),
+            'membership_card_page_id' => array( 'My Membership Card', 'membership-card', '[bsxmh_membership_card]' ),
+            'finance_page_id' => array( 'My Finance', 'member-finance', '[bsxmh_member_finance]' ),
+            'notifications_page_id' => array( 'Member Notifications', 'member-notifications', '[bsxmh_notifications]' ),
+            'directory_page_id' => array( 'Member Directory', 'member-directory', '[bsxmh_member_directory]' ),
+            'verification_page_id' => array( 'Member Verification', 'member-verification', '[bsxmh_member_verification]' ),
         );
         $settings = get_option( 'bsxmh_settings', array() );
         foreach ( $pages as $key => $page ) {
@@ -245,6 +297,7 @@ final class BSXMH_Portal {
 
     public static function login_form(): string {
         wp_enqueue_style( 'bsxmh-public' );
+        wp_enqueue_script( 'bsxmh-public' );
         if ( is_user_logged_in() ) {
             return '<div class="bsxmh-notice bsxmh-success">' . esc_html__( 'You are already logged in.', 'bsx-memberhub' ) . ' <a href="' . esc_url( self::page_url( 'dashboard_page_id', '/member-dashboard/' ) ) . '">' . esc_html__( 'Open dashboard', 'bsx-memberhub' ) . '</a></div>';
         }
@@ -259,18 +312,24 @@ final class BSXMH_Portal {
         }
         ob_start();
         ?>
-        <div class="bsxmh-login-shell">
+        <?php $settings = get_option( 'bsxmh_settings', array() ); ?>
+        <div class="bsxmh-login-shell bsxmh-auth-shell">
+            <div class="bsxmh-auth-header">
+                <?php if ( ! empty( $settings['organization_logo_url'] ) ) : ?><img class="bsxmh-auth-logo" src="<?php echo esc_url( $settings['organization_logo_url'] ); ?>" alt="<?php echo esc_attr( $settings['organization_name'] ?? get_bloginfo( 'name' ) ); ?>"><?php endif; ?>
+                <?php if ( ! empty( $settings['login_description'] ) ) : ?><p><?php echo esc_html( $settings['login_description'] ); ?></p><?php endif; ?>
+            </div>
             <form method="post" class="bsxmh-form bsxmh-login-form">
                 <h2><?php esc_html_e( 'Member Login', 'bsx-memberhub' ); ?></h2>
                 <?php if ( $error ) : ?><div class="bsxmh-notice bsxmh-error"><?php echo esc_html( $error ); ?></div><?php endif; ?>
                 <?php if ( isset( $_GET['logged_out'] ) ) : ?><div class="bsxmh-notice bsxmh-success"><?php esc_html_e( 'You have been logged out successfully.', 'bsx-memberhub' ); ?></div><?php endif; ?>
                 <?php wp_nonce_field( 'bsxmh_front_login', 'bsxmh_login_nonce' ); ?>
                 <input type="hidden" name="bsxmh_login_submit" value="1">
-                <div><label for="bsxmh-log"><?php esc_html_e( 'Username or Email', 'bsx-memberhub' ); ?></label><input id="bsxmh-log" name="log" type="text" autocomplete="username" required></div>
-                <div><label for="bsxmh-pwd"><?php esc_html_e( 'Password', 'bsx-memberhub' ); ?></label><input id="bsxmh-pwd" name="pwd" type="password" autocomplete="current-password" required></div>
+                <div><label for="bsxmh-log"><?php esc_html_e( 'Username or Email', 'bsx-memberhub' ); ?> <span class="bsxmh-required" aria-hidden="true">*</span></label><input id="bsxmh-log" name="log" type="text" autocomplete="username" required></div>
+                <div><label for="bsxmh-pwd"><?php esc_html_e( 'Password', 'bsx-memberhub' ); ?> <span class="bsxmh-required" aria-hidden="true">*</span></label><div class="bsxmh-password-wrap"><input id="bsxmh-pwd" name="pwd" type="password" autocomplete="current-password" required><button class="bsxmh-password-toggle" type="button" data-bsxmh-toggle-password="bsxmh-pwd" aria-label="<?php esc_attr_e( 'Show password', 'bsx-memberhub' ); ?>"><?php esc_html_e( 'Show', 'bsx-memberhub' ); ?></button></div></div>
                 <label class="bsxmh-check"><input type="checkbox" name="rememberme" value="1"> <?php esc_html_e( 'Remember me', 'bsx-memberhub' ); ?></label>
                 <button type="submit"><?php esc_html_e( 'Log In', 'bsx-memberhub' ); ?></button>
-                <div class="bsxmh-login-links"><a href="<?php echo esc_url( wp_lostpassword_url( self::page_url( 'login_page_id', '/member-login/' ) ) ); ?>"><?php esc_html_e( 'Forgot password?', 'bsx-memberhub' ); ?></a><a href="<?php echo esc_url( self::page_url( 'registration_page_id', '/member-registration/' ) ); ?>"><?php esc_html_e( 'Create account', 'bsx-memberhub' ); ?></a></div>
+                <div class="bsxmh-login-links"><a href="<?php echo esc_url( wp_lostpassword_url( self::page_url( 'login_page_id', '/member-login/' ) ) ); ?>"><?php esc_html_e( 'Forgot password?', 'bsx-memberhub' ); ?></a></div>
+                <div class="bsxmh-auth-switch"><span><?php esc_html_e( "Don't have an account?", 'bsx-memberhub' ); ?></span> <a class="bsxmh-secondary-button" href="<?php echo esc_url( self::page_url( 'registration_page_id', '/member-registration/' ) ); ?>"><?php esc_html_e( 'Register as Member', 'bsx-memberhub' ); ?></a></div>
             </form>
         </div>
         <?php
@@ -297,36 +356,88 @@ final class BSXMH_Portal {
         } elseif ( 'custom_failed' === $profile_status ) {
             $errors = get_transient( 'bsxmh_profile_errors_' . (int) $user->ID ); delete_transient( 'bsxmh_profile_errors_' . (int) $user->ID );
             $message = '<div class="bsxmh-notice bsxmh-error">' . esc_html( implode( ' ', (array) $errors ) ) . '</div>';
+        } elseif ( 'photo_too_large' === $profile_status ) {
+            $message = '<div class="bsxmh-notice bsxmh-error">' . esc_html__( 'The profile photo is larger than the allowed upload size.', 'bsx-memberhub' ) . '</div>';
+        } elseif ( 'photo_type' === $profile_status ) {
+            $message = '<div class="bsxmh-notice bsxmh-error">' . esc_html__( 'Please upload a JPG, PNG or WebP image.', 'bsx-memberhub' ) . '</div>';
+        } elseif ( 'photo_failed' === $profile_status ) {
+            $photo_error = get_transient( 'bsxmh_profile_photo_error_' . (int) $user->ID ); delete_transient( 'bsxmh_profile_photo_error_' . (int) $user->ID );
+            $message = '<div class="bsxmh-notice bsxmh-error">' . esc_html( $photo_error ?: __( 'The profile photo could not be updated.', 'bsx-memberhub' ) ) . '</div>';
         } elseif ( 'failed' === $profile_status ) {
             $message = '<div class="bsxmh-notice bsxmh-error">' . esc_html__( 'Profile update failed. Please try again.', 'bsx-memberhub' ) . '</div>';
         }
         $core_fields = BSXMH_Form_Builder::core_settings();
         ob_start(); echo $message; ?>
-        <form method="post" enctype="multipart/form-data" class="bsxmh-form">
-            <h2><?php esc_html_e( 'My Profile', 'bsx-memberhub' ); ?></h2>
+        <div class="bsxmh-page-heading"><div><p class="bsxmh-eyebrow"><?php esc_html_e( 'Account & identity', 'bsx-memberhub' ); ?></p><h2><?php esc_html_e( 'My Profile', 'bsx-memberhub' ); ?></h2><p><?php esc_html_e( 'Keep your contact and membership information accurate.', 'bsx-memberhub' ); ?></p></div></div>
+        <?php echo wp_kses_post( BSXMH_Profile_Completion::render_card( (int) $user->ID, $member, true ) ); ?>
+        <form method="post" enctype="multipart/form-data" class="bsxmh-form bsxmh-profile-form">
+            <h3><?php esc_html_e( 'Profile Information', 'bsx-memberhub' ); ?></h3>
             <?php wp_nonce_field( 'bsxmh_front_profile', 'bsxmh_profile_nonce' ); ?><input type="hidden" name="bsxmh_profile_submit" value="1">
+            <?php $photo_settings = get_option( 'bsxmh_settings', array() ); $allow_photo = ! isset( $photo_settings['allow_member_profile_photo'] ) || ! empty( $photo_settings['allow_member_profile_photo'] ); ?>
+            <?php if ( $allow_photo && $member ) : ?>
+            <section class="bsxmh-profile-photo-card">
+                <div class="bsxmh-profile-photo-preview"><?php echo BSXMH_Members::profile_photo_html( $member, 128, 'bsxmh-profile-self-photo' ); ?></div>
+                <div class="bsxmh-profile-photo-controls">
+                    <h3><?php esc_html_e( 'Profile Photo', 'bsx-memberhub' ); ?></h3>
+                    <input type="file" name="profile_photo" id="bsxmh-profile-photo" accept="image/jpeg,image/png,image/webp">
+                    <small><?php printf( esc_html__( 'JPG, PNG or WebP. Maximum %d MB. A square photo works best.', 'bsx-memberhub' ), max( 1, min( 10, absint( $photo_settings['profile_photo_max_mb'] ?? 2 ) ) ) ); ?></small>
+                    <?php if ( BSXMH_Members::profile_photo_id( $member ) ) : ?><label class="bsxmh-remove-photo"><input type="checkbox" name="remove_profile_photo" value="1"> <?php esc_html_e( 'Remove current photo', 'bsx-memberhub' ); ?></label><?php endif; ?>
+                </div>
+            </section>
+            <?php endif; ?>
             <div><label><?php esc_html_e( 'Member ID', 'bsx-memberhub' ); ?></label><input type="text" value="<?php echo esc_attr( $member->member_number ?? '' ); ?>" disabled></div>
+            <?php $member_tags = $member ? BSXMH_Members::tags( $member ) : array(); ?>
+            <?php if ( ! empty( $member_tags ) ) : ?><div class="bsxmh-profile-tags-field"><label><?php esc_html_e( 'Member Tags', 'bsx-memberhub' ); ?></label><div class="bsxmh-member-tags bsxmh-member-tags-public"><?php foreach ( $member_tags as $member_tag ) : ?><span><?php echo esc_html( $member_tag ); ?></span><?php endforeach; ?></div><small><?php esc_html_e( 'Tags are assigned by an administrator.', 'bsx-memberhub' ); ?></small></div><?php endif; ?>
             <div><label for="bsxmh-display-name"><?php esc_html_e( 'Full Name', 'bsx-memberhub' ); ?></label><input id="bsxmh-display-name" name="display_name" value="<?php echo esc_attr( $user->display_name ); ?>" required></div>
             <div><label for="bsxmh-profile-email"><?php esc_html_e( 'Email', 'bsx-memberhub' ); ?></label><input id="bsxmh-profile-email" type="email" name="email" value="<?php echo esc_attr( $user->user_email ); ?>" required></div>
             <?php if ( ! empty( $core_fields['phone_enabled'] ) ) : ?><div><label for="bsxmh-profile-phone"><?php echo esc_html( $core_fields['phone_label'] ); ?></label><input id="bsxmh-profile-phone" name="phone" value="<?php echo esc_attr( get_user_meta( (int) $user->ID, 'bsxmh_phone', true ) ); ?>" <?php echo ! empty( $core_fields['phone_required'] ) ? 'required' : ''; ?>></div><?php endif; ?>
             <?php echo BSXMH_Form_Builder::render_fields( 'profile', (int) $user->ID ); ?>
             <div><label for="bsxmh-new-password"><?php esc_html_e( 'New Password', 'bsx-memberhub' ); ?></label><input id="bsxmh-new-password" type="password" name="new_password" minlength="8"><small><?php esc_html_e( 'Leave blank to keep the current password.', 'bsx-memberhub' ); ?></small></div>
+            <?php $directory_settings = get_option( 'bsxmh_settings', array() ); if ( ! isset( $directory_settings['directory_allow_opt_out'] ) || ! empty( $directory_settings['directory_allow_opt_out'] ) ) : ?><div class="bsxmh-directory-privacy-setting"><label><input type="checkbox" name="directory_hidden" value="1" <?php checked( get_user_meta( get_current_user_id(), 'bsxmh_directory_hidden', true ), '1' ); ?>> <span><strong><?php esc_html_e( 'Hide me from the Member Directory', 'bsx-memberhub' ); ?></strong><small><?php esc_html_e( 'Your private contact and payment details are never shown in the directory.', 'bsx-memberhub' ); ?></small></span></label></div><?php endif; ?>
             <button type="submit"><?php esc_html_e( 'Update Profile', 'bsx-memberhub' ); ?></button>
         </form>
-        <?php return (string) ob_get_clean();
+        <?php return self::wrap_member_page( (string) ob_get_clean(), 'profile' );
     }
 
-    public static function nav(): string {
+    public static function wrap_member_page( string $content, string $active = '' ): string {
+        if ( ! is_user_logged_in() || ! self::is_member_user() ) {
+            return $content;
+        }
+        $settings = get_option( 'bsxmh_settings', array() );
+        $footer = trim( (string) ( $settings['portal_footer_text'] ?? '' ) );
+        $support = array();
+        if ( ! empty( $settings['support_email'] ) ) $support[] = '<a href="mailto:' . esc_attr( $settings['support_email'] ) . '">' . esc_html( $settings['support_email'] ) . '</a>';
+        if ( ! empty( $settings['support_phone'] ) ) $support[] = '<span>' . esc_html( $settings['support_phone'] ) . '</span>';
+        $footer_html = ( $footer || $support ) ? '<footer class="bsxmh-portal-footer"><span>' . esc_html( $footer ) . '</span>' . ( $support ? '<span>' . implode( ' · ', $support ) . '</span>' : '' ) . '</footer>' : '';
+        return '<div class="bsxmh-portal-shell">' . self::nav( $active ) . '<main class="bsxmh-portal-content">' . $content . $footer_html . '</main></div>';
+    }
+
+    public static function nav( string $active = '' ): string {
         if ( ! is_user_logged_in() || ! self::is_member_user() ) return '';
         $items = array(
-            self::page_url( 'dashboard_page_id', '/member-dashboard/' ) => __( 'Overview', 'bsx-memberhub' ),
-            self::page_url( 'payment_page_id', '/member-payment/' ) => __( 'Pay Fees', 'bsx-memberhub' ),
-            self::page_url( 'contribution_page_id', '/member-contribution/' ) => __( 'Contribution', 'bsx-memberhub' ),
-            self::page_url( 'events_page_id', '/member-events/' ) => __( 'Events', 'bsx-memberhub' ),
-            self::page_url( 'profile_page_id', '/member-profile/' ) => __( 'Profile', 'bsx-memberhub' ),
-            wp_logout_url( self::page_url( 'login_page_id', '/member-login/' ) ) => __( 'Logout', 'bsx-memberhub' ),
+            'overview'     => array( self::page_url( 'dashboard_page_id', '/member-dashboard/' ), __( 'Overview', 'bsx-memberhub' ), '⌂' ),
+            'payment'      => array( self::page_url( 'payment_page_id', '/member-payment/' ), __( 'Pay Fees', 'bsx-memberhub' ), '৳' ),
+            'contribution' => array( self::page_url( 'contribution_page_id', '/member-contribution/' ), __( 'Contribution', 'bsx-memberhub' ), '♥' ),
+            'events'       => array( self::page_url( 'events_page_id', '/member-events/' ), __( 'Events', 'bsx-memberhub' ), '◇' ),
+            'card'         => array( self::page_url( 'membership_card_page_id', '/membership-card/' ), __( 'My Card', 'bsx-memberhub' ), '▣' ),
+            'finance'      => array( self::page_url( 'finance_page_id', '/member-finance/' ), __( 'My Finance', 'bsx-memberhub' ), '▤' ),
+            'notifications'=> array( self::page_url( 'notifications_page_id', '/member-notifications/' ), __( 'Notifications', 'bsx-memberhub' ), '●' ),
+            'directory'    => array( self::page_url( 'directory_page_id', '/member-directory/' ), __( 'Directory', 'bsx-memberhub' ), '◎' ),
         );
-        $html = '<nav class="bsxmh-portal-nav">'; foreach ( $items as $url => $label ) $html .= '<a href="' . esc_url( $url ) . '">' . esc_html( $label ) . '</a>'; return $html . '</nav>';
+        if ( class_exists( 'BSXMH_Member_Directory' ) && ! BSXMH_Member_Directory::enabled() ) { unset( $items['directory'] ); }
+        if ( BSXMH_Transparency::show_in_member_navigation() ) {
+            $items['transparency'] = array( self::page_url( 'transparency_page_id', '/transparency-dashboard/' ), __( 'Transparency', 'bsx-memberhub' ), '◫' );
+        }
+        $items['profile'] = array( self::page_url( 'profile_page_id', '/member-profile/' ), __( 'Profile', 'bsx-memberhub' ), '●' );
+        $items['logout'] = array( wp_logout_url( self::page_url( 'login_page_id', '/member-login/' ) ), __( 'Logout', 'bsx-memberhub' ), '↗' );
+        $html = '<nav class="bsxmh-portal-nav" aria-label="' . esc_attr__( 'Member portal navigation', 'bsx-memberhub' ) . '">';
+        foreach ( $items as $key => $item ) {
+            $class = $active === $key ? ' class="is-active" aria-current="page"' : '';
+            $label = '<span class="bsxmh-nav-icon" aria-hidden="true">' . esc_html( $item[2] ?? '•' ) . '</span><span class="bsxmh-nav-label">' . esc_html( $item[1] ) . '</span>';
+            if ( 'notifications' === $key && class_exists( 'BSXMH_Notifications' ) ) { $count = BSXMH_Notifications::unread_count(); if ( $count ) $label .= ' <span class="bsxmh-nav-badge">' . number_format_i18n( $count ) . '</span>'; }
+            $html .= '<a' . $class . ' href="' . esc_url( $item[0] ) . '">' . $label . '</a>';
+        }
+        return $html . '</nav>';
     }
 
     public static function announcements(): string {

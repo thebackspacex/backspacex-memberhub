@@ -16,7 +16,7 @@ final class BSXMH_Payment_Control {
 
         $month = self::valid_month( sanitize_text_field( wp_unslash( $_GET['month'] ?? '' ) ) ) ?: current_time( 'Y-m' );
         $tab = sanitize_key( $_GET['view'] ?? 'all' );
-        if ( ! in_array( $tab, array( 'all', 'paid', 'unpaid', 'not_applicable' ), true ) ) {
+        if ( ! in_array( $tab, array( 'all', 'paid', 'unpaid', 'not_applicable', 'deleted' ), true ) ) {
             $tab = 'all';
         }
         $search = sanitize_text_field( wp_unslash( $_GET['s'] ?? '' ) );
@@ -26,7 +26,9 @@ final class BSXMH_Payment_Control {
         $rows = self::member_rows( $month );
         $summary = self::summary( $rows );
         $filtered = array_values( array_filter( $rows, static function ( array $row ) use ( $tab, $search, $status_filter, $reminder_filter ): bool {
-            if ( 'all' !== $tab && $row['month_status'] !== $tab ) {
+            if ( 'deleted' === $tab && 'deleted' !== $row['member']->status ) { return false; }
+            if ( 'deleted' !== $tab && 'deleted' === $row['member']->status ) { return false; }
+            if ( 'deleted' !== $tab && 'all' !== $tab && $row['month_status'] !== $tab ) {
                 return false;
             }
             if ( $status_filter && $row['member']->status !== $status_filter ) {
@@ -44,6 +46,13 @@ final class BSXMH_Payment_Control {
             if ( 'sent' === $reminder_filter && ! $row['last_reminder'] ) {
                 return false;
             }
+            if ( $completion_filter ) {
+                $completion = BSXMH_Profile_Completion::calculate( (int) $row['member']->user_id, $row['member'] );
+                $percent = (int) $completion['percent'];
+                if ( 'complete' === $completion_filter && $percent < 100 ) return false;
+                if ( 'incomplete' === $completion_filter && $percent >= 100 ) return false;
+                if ( 'below_50' === $completion_filter && $percent >= 50 ) return false;
+            }
             return true;
         } ) );
 
@@ -55,7 +64,7 @@ final class BSXMH_Payment_Control {
         echo '<div class="wrap bsxmh-wrap"><h1>Members <a class="page-title-action" href="' . esc_url( admin_url( 'admin.php?page=bsxmh-members&action=add' ) ) . '">Add New</a></h1>';
         self::render_notice();
         echo '<style>
-        .bsxmh-control-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0}.bsxmh-control-head form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.bsxmh-status-paid{color:#087b36;font-weight:700}.bsxmh-status-unpaid{color:#b42318;font-weight:700}.bsxmh-status-not_applicable{color:#667085}.bsxmh-due-list{max-width:300px}.bsxmh-due-list details summary{cursor:pointer}.bsxmh-actions{display:flex;gap:6px;flex-wrap:wrap}.bsxmh-severity{display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:700;background:#f2f4f7}.bsxmh-severity-high,.bsxmh-severity-critical{background:#fee4e2;color:#b42318}.bsxmh-severity-medium{background:#fef0c7;color:#93370d}.bsxmh-severity-low{background:#ecfdf3;color:#027a48}.bsxmh-tabs{margin:15px 0}.bsxmh-tabs a{display:inline-block;padding:8px 12px;text-decoration:none;border:1px solid #c3c4c7;background:#fff;margin-right:4px}.bsxmh-tabs a.current{background:#2271b1;color:#fff;border-color:#2271b1}.bsxmh-month-nav{display:flex;gap:8px;align-items:center}.bsxmh-table-wrap{overflow:auto}.bsxmh-table-wrap table{min-width:1250px}
+        .bsxmh-control-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0}.bsxmh-control-head form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.bsxmh-status-paid{color:#087b36;font-weight:700}.bsxmh-status-unpaid{color:#b42318;font-weight:700}.bsxmh-status-not_applicable{color:#667085}.bsxmh-due-list{max-width:300px}.bsxmh-due-list details summary{cursor:pointer}.bsxmh-actions{display:flex;gap:6px;flex-wrap:wrap}.bsxmh-severity{display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:700;background:#f2f4f7}.bsxmh-severity-high,.bsxmh-severity-critical{background:#fee4e2;color:#b42318}.bsxmh-severity-medium{background:#fef0c7;color:#93370d}.bsxmh-severity-low{background:#ecfdf3;color:#027a48}.bsxmh-tabs{margin:15px 0}.bsxmh-tabs a{display:inline-block;padding:8px 12px;text-decoration:none;border:1px solid #c3c4c7;background:#fff;margin-right:4px}.bsxmh-tabs a.current{background:#2271b1;color:#fff;border-color:#2271b1}.bsxmh-month-nav{display:flex;gap:8px;align-items:center}.bsxmh-table-wrap{overflow:auto}.bsxmh-table-wrap table{min-width:1320px}.bsxmh-admin-completion{min-width:92px}.bsxmh-admin-completion>span{display:block;height:6px;margin-top:5px;background:#e2e8f0;border-radius:99px;overflow:hidden}.bsxmh-admin-completion i{display:block;height:100%;background:#2271b1}
         </style>';
 
         echo '<div class="bsxmh-cards">';
@@ -71,14 +80,14 @@ final class BSXMH_Payment_Control {
 
         echo '<div class="bsxmh-panel"><div class="bsxmh-control-head"><div class="bsxmh-month-nav"><a class="button" href="' . esc_url( self::page_url( array( 'month' => $prev, 'view' => $tab ) ) ) . '">&larr; Previous</a><strong>' . esc_html( $month_label ) . '</strong><a class="button" href="' . esc_url( self::page_url( array( 'month' => $next, 'view' => $tab ) ) ) . '">Next &rarr;</a></div>';
         echo '<form method="get"><input type="hidden" name="page" value="bsxmh-members"><input type="hidden" name="view" value="' . esc_attr( $tab ) . '"><input type="month" name="month" value="' . esc_attr( $month ) . '"><input type="search" name="s" value="' . esc_attr( $search ) . '" placeholder="Name, email, mobile or ID"><select name="status"><option value="">All member statuses</option>';
-        foreach ( array( 'active' => 'Active', 'pending' => 'Pending', 'inactive' => 'Inactive', 'suspended' => 'Suspended' ) as $key => $label ) {
+        foreach ( array( 'active' => 'Active', 'pending' => 'Pending', 'inactive' => 'Inactive', 'suspended' => 'Suspended', 'deleted' => 'Deleted User' ) as $key => $label ) {
             echo '<option value="' . esc_attr( $key ) . '" ' . selected( $status_filter, $key, false ) . '>' . esc_html( $label ) . '</option>';
         }
-        echo '</select><select name="reminder"><option value="">Any reminder status</option><option value="never" ' . selected( $reminder_filter, 'never', false ) . '>Never reminded</option><option value="sent" ' . selected( $reminder_filter, 'sent', false ) . '>Reminder sent</option></select><button class="button">Apply</button></form></div>';
+        echo '</select><select name="completion"><option value="">Any profile completion</option><option value="complete" ' . selected( $completion_filter, 'complete', false ) . '>100% complete</option><option value="incomplete" ' . selected( $completion_filter, 'incomplete', false ) . '>Incomplete</option><option value="below_50" ' . selected( $completion_filter, 'below_50', false ) . '>Below 50%</option></select><select name="reminder"><option value="">Any reminder status</option><option value="never" ' . selected( $reminder_filter, 'never', false ) . '>Never reminded</option><option value="sent" ' . selected( $reminder_filter, 'sent', false ) . '>Reminder sent</option></select><button class="button">Apply</button></form></div>';
 
         echo '<div class="bsxmh-tabs">';
-        foreach ( array( 'all' => 'All Members', 'paid' => 'Paid Members', 'unpaid' => 'Unpaid Members', 'not_applicable' => 'Not Applicable' ) as $key => $label ) {
-            $count = 'all' === $key ? count( $rows ) : count( array_filter( $rows, static fn( $r ) => $r['month_status'] === $key ) );
+        foreach ( array( 'all' => 'All Members', 'paid' => 'Paid Members', 'unpaid' => 'Unpaid Members', 'not_applicable' => 'Not Applicable', 'deleted' => 'Deleted Users' ) as $key => $label ) {
+            $count = 'all' === $key ? count( array_filter( $rows, static fn( $r ) => 'deleted' !== $r['member']->status ) ) : ( 'deleted' === $key ? count( array_filter( $rows, static fn( $r ) => 'deleted' === $r['member']->status ) ) : count( array_filter( $rows, static fn( $r ) => $r['month_status'] === $key ) ) );
             echo '<a class="' . ( $tab === $key ? 'current' : '' ) . '" href="' . esc_url( self::page_url( array( 'month' => $month, 'view' => $key, 's' => $search, 'status' => $status_filter, 'reminder' => $reminder_filter ) ) ) . '">' . esc_html( $label ) . ' (' . number_format_i18n( $count ) . ')</a>';
         }
         echo '</div>';
@@ -86,9 +95,9 @@ final class BSXMH_Payment_Control {
         echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '"><input type="hidden" name="action" value="bsxmh_bulk_member_reminder"><input type="hidden" name="month" value="' . esc_attr( $month ) . '"><input type="hidden" name="return_view" value="' . esc_attr( $tab ) . '">';
         wp_nonce_field( 'bsxmh_bulk_member_reminder' );
         echo '<p><button class="button button-primary" name="mode" value="selected">Send Reminder to Selected Unpaid Members</button> <button class="button" name="mode" value="all_unpaid">Send Reminder to All Unpaid Members</button></p>';
-        echo '<div class="bsxmh-table-wrap"><table class="widefat striped"><thead><tr><th><input type="checkbox" onclick="document.querySelectorAll(\'.bsxmh-member-check\').forEach(c=>c.checked=this.checked)"></th><th>Member</th><th>Contact</th><th>Member Status</th><th>' . esc_html( $month_label ) . '</th><th>Monthly Fee</th><th>Total Paid</th><th>Total Due</th><th>Due Months</th><th>Payment Details</th><th>Last Reminder</th><th>Actions</th></tr></thead><tbody>';
+        echo '<div class="bsxmh-table-wrap"><table class="widefat striped"><thead><tr><th><input type="checkbox" onclick="document.querySelectorAll(\'.bsxmh-member-check\').forEach(c=>c.checked=this.checked)"></th><th>Member</th><th>Contact</th><th>Member Status</th><th>Profile</th><th>' . esc_html( $month_label ) . '</th><th>Monthly Fee</th><th>Total Paid</th><th>Total Due</th><th>Due Months</th><th>Payment Details</th><th>Last Reminder</th><th>Actions</th></tr></thead><tbody>';
         if ( ! $filtered ) {
-            echo '<tr><td colspan="12">No members match the selected filters.</td></tr>';
+            echo '<tr><td colspan="13">No members match the selected filters.</td></tr>';
         }
         foreach ( $filtered as $row ) {
             self::render_row( $row, $month );
@@ -119,7 +128,10 @@ final class BSXMH_Payment_Control {
         if ( $due_count ) {
             $due_html = '<div class="bsxmh-due-list"><strong>' . number_format_i18n( $due_count ) . ' month(s)</strong> <span class="bsxmh-severity bsxmh-severity-' . esc_attr( $severity ) . '">' . esc_html( ucfirst( $severity ) ) . '</span><details><summary>View months</summary>' . esc_html( implode( ', ', $due_labels ) ) . '</details></div>';
         }
-        $actions = '<div class="bsxmh-actions"><a class="button button-small" href="' . esc_url( admin_url( 'admin.php?page=bsxmh-members&action=statement&member_id=' . $m->id ) ) . '">Statement</a><a class="button button-small" href="' . esc_url( admin_url( 'admin.php?page=bsxmh-payments&action=add&member_id=' . $m->id ) ) . '">Add Payment</a><a class="button button-small" href="' . esc_url( admin_url( 'admin.php?page=bsxmh-members&action=edit&member_id=' . $m->id ) ) . '">Edit</a>';
+        $actions = '<div class="bsxmh-actions"><a class="button button-small button-primary" href="' . esc_url( admin_url( 'admin.php?page=bsxmh-members&action=profile&member_id=' . $m->id ) ) . '">Member 360°</a><a class="button button-small" href="' . esc_url( admin_url( 'admin.php?page=bsxmh-members&action=statement&member_id=' . $m->id ) ) . '">Statement</a>';
+        if ( 'deleted' !== $m->status ) {
+            $actions .= '<a class="button button-small" href="' . esc_url( admin_url( 'admin.php?page=bsxmh-payments&action=add&member_id=' . $m->id ) ) . '">Add Payment</a><a class="button button-small" href="' . esc_url( admin_url( 'admin.php?page=bsxmh-members&action=edit&member_id=' . $m->id ) ) . '">Edit</a>';
+        } else { $actions .= '<span class="bsxmh-badge">WordPress account deleted</span>'; }
         if ( 'unpaid' === $row['month_status'] && 'active' === $m->status ) {
             $send_url = wp_nonce_url( admin_url( 'admin-post.php?action=bsxmh_send_member_reminder&member_id=' . $m->id . '&month=' . rawurlencode( $month ) ), 'bsxmh_send_member_reminder_' . $m->id );
             $link_url = wp_nonce_url( admin_url( 'admin-post.php?action=bsxmh_copy_member_payment_link&member_id=' . $m->id . '&month=' . rawurlencode( $month ) ), 'bsxmh_copy_member_payment_link_' . $m->id );
@@ -128,9 +140,12 @@ final class BSXMH_Payment_Control {
         $actions .= '</div>';
 
         echo '<tr><td>' . ( 'unpaid' === $row['month_status'] && 'active' === $m->status ? '<input class="bsxmh-member-check" type="checkbox" name="member_ids[]" value="' . absint( $m->id ) . '">' : '' ) . '</td>';
-        echo '<td><strong>' . esc_html( $row['display_name'] ) . '</strong><br><code>' . esc_html( $m->member_number ) . '</code></td>';
+        echo '<td><div class="bsxmh-member-cell">' . BSXMH_Members::profile_photo_html( $m, 42, 'bsxmh-member-list-photo' ) . '<div><strong>' . esc_html( $row['display_name'] ) . '</strong><br><code>' . esc_html( $m->member_number ) . '</code></div></div></td>';
         echo '<td>' . esc_html( $row['email'] ) . ( $row['phone'] ? '<br>' . esc_html( $row['phone'] ) : '' ) . '</td>';
         echo '<td>' . esc_html( ucfirst( $m->status ) ) . '</td>';
+        $completion = BSXMH_Profile_Completion::calculate( (int) $m->user_id, $m );
+        $completion_percent = (int) $completion['percent'];
+        echo '<td><div class="bsxmh-admin-completion"><strong>' . esc_html( $completion_percent . '%' ) . '</strong><span><i style="width:' . esc_attr( $completion_percent ) . '%"></i></span></div></td>';
         echo '<td><span class="' . esc_attr( $status_class ) . '">' . esc_html( $status_label ) . '</span></td>';
         echo '<td>' . esc_html( $sym . number_format_i18n( (float) $m->monthly_fee, 2 ) ) . '</td>';
         echo '<td>' . esc_html( $sym . number_format_i18n( (float) $row['statement']['total_paid'], 2 ) ) . '</td>';
@@ -223,8 +238,9 @@ final class BSXMH_Payment_Control {
         foreach ( $members as $m ) {
             $profile = json_decode( (string) $m->profile_data, true );
             $profile = is_array( $profile ) ? $profile : array();
+            $snapshot = BSXMH_Members::display_snapshot( $m );
             $eligible = ! empty( BSXMH_Payments::eligible_months( $m, $month ) );
-            $paid = isset( $payments[ (int) $m->user_id ] );
+            $paid = isset( $payments[ (int) $m->id ] );
             $month_status = 'not_applicable';
             if ( 'active' === $m->status && $eligible ) {
                 $month_status = $paid ? 'paid' : 'unpaid';
@@ -233,11 +249,11 @@ final class BSXMH_Payment_Control {
             }
             $rows[] = array(
                 'member' => $m,
-                'display_name' => $m->display_name ?: $m->member_number,
-                'email' => (string) $m->user_email,
-                'phone' => (string) ( get_user_meta( (int) $m->user_id, 'bsxmh_phone', true ) ?: ( $profile['phone'] ?? '' ) ),
+                'display_name' => $snapshot['name'],
+                'email' => $snapshot['email'],
+                'phone' => $snapshot['phone'],
                 'month_status' => $month_status,
-                'payment' => $payments[ (int) $m->user_id ] ?? null,
+                'payment' => $payments[ (int) $m->id ] ?? null,
                 'statement' => BSXMH_Payments::statement( $m ),
                 'last_reminder' => $last_reminders[ (int) $m->user_id ] ?? null,
             );
@@ -249,14 +265,15 @@ final class BSXMH_Payment_Control {
         global $wpdb;
         list( $year, $mon ) = array_map( 'intval', explode( '-', $month ) );
         $rows = $wpdb->get_results( $wpdb->prepare(
-            "SELECT p.*,i.amount item_amount FROM " . BSXMH_DB::table( 'payments' ) . " p INNER JOIN " . BSXMH_DB::table( 'payment_items' ) . " i ON i.payment_id=p.id WHERE p.status='paid' AND p.payment_type='membership' AND i.item_type='membership' AND i.period_year=%d AND i.period_month=%d ORDER BY p.payment_date DESC,p.id DESC",
+            "SELECT p.*,i.amount item_amount,i.reference_id member_id FROM " . BSXMH_DB::table( 'payments' ) . " p INNER JOIN " . BSXMH_DB::table( 'payment_items' ) . " i ON i.payment_id=p.id WHERE p.status='paid' AND p.payment_type='membership' AND i.item_type='membership' AND i.period_year=%d AND i.period_month=%d ORDER BY p.payment_date DESC,p.id DESC",
             $year,
             $mon
         ) );
         $map = array();
         foreach ( $rows as $row ) {
-            if ( $row->user_id && ! isset( $map[ (int) $row->user_id ] ) ) {
-                $map[ (int) $row->user_id ] = $row;
+            $key = (int) $row->member_id;
+            if ( $key > 0 && ! isset( $map[ $key ] ) ) {
+                $map[ $key ] = $row;
             }
         }
         return $map;

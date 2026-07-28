@@ -31,14 +31,17 @@ final class BSXMH_DB {
                 join_date date NULL,
                 fee_start_date date NULL,
                 monthly_fee decimal(18,2) NULL,
+                membership_fund_id bigint unsigned NULL,
                 profile_data longtext NULL,
                 admin_notes longtext NULL,
+                deleted_at datetime NULL,
                 created_at datetime NOT NULL,
                 updated_at datetime NOT NULL,
                 PRIMARY KEY  (id),
                 UNIQUE KEY user_id (user_id),
                 UNIQUE KEY member_number (member_number),
-                KEY status (status)
+                KEY status (status),
+                KEY membership_fund_id (membership_fund_id)
             ) {$charset};",
             "CREATE TABLE {$p}member_categories (
                 id bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -248,6 +251,23 @@ final class BSXMH_DB {
                 PRIMARY KEY  (id),
                 KEY payment_id (payment_id),
                 KEY gateway (gateway)
+            ) {$charset};",
+            "CREATE TABLE {$p}notifications (
+                id bigint unsigned NOT NULL AUTO_INCREMENT,
+                user_id bigint unsigned NOT NULL,
+                title varchar(255) NOT NULL,
+                message longtext NOT NULL,
+                notification_type varchar(60) NOT NULL DEFAULT 'general',
+                action_url text NULL,
+                is_read tinyint(1) NOT NULL DEFAULT 0,
+                is_archived tinyint(1) NOT NULL DEFAULT 0,
+                created_by bigint unsigned NULL,
+                read_at datetime NULL,
+                created_at datetime NOT NULL,
+                PRIMARY KEY  (id),
+                KEY user_id (user_id),
+                KEY unread (user_id,is_read,is_archived),
+                KEY created_at (created_at)
             ) {$charset};",
             "CREATE TABLE {$p}activity_logs (
                 id bigint unsigned NOT NULL AUTO_INCREMENT,

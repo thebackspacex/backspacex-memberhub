@@ -18,24 +18,41 @@ final class BSXMH_Email_Automation {
         add_action( 'bsxmh_generate_due_reminders', array( __CLASS__, 'scheduled_reminders' ) );
         add_action( 'bsxmh_hourly_email_queue', array( __CLASS__, 'process_queue' ) );
         add_shortcode( 'bsxmh_guest_payment', array( __CLASS__, 'guest_payment_shortcode' ) );
-        add_action( 'bsxmh_member_registered', static function( int $user_id ): void { self::queue_template( 'registration_pending', $user_id ); } );
+        add_action( 'bsxmh_member_registered', array( __CLASS__, 'handle_member_registered' ) );
         add_action( 'bsxmh_member_approved', static function( int $user_id ): void { self::queue_template( 'registration_approved', $user_id ); } );
+        add_action( 'bsxmh_member_status_changed', array( __CLASS__, 'handle_member_status_changed' ), 10, 4 );
         add_action( 'bsxmh_payment_completed', static function( int $payment_id ): void { self::queue_payment_success( $payment_id ); } );
     }
 
     public static function ensure_defaults(): void {
         $defaults = array(
-            'registration_pending' => array( 'subject' => 'Registration received - {{organization_name}}', 'body' => "Hello {{member_name}},\n\nYour registration has been received and is awaiting approval.\n\nMember ID: {{member_id}}\n\n{{organization_name}}" ),
+            'registration_pending' => array( 'subject' => 'Registration successful - awaiting approval | {{organization_name}}', 'body' => "Hello {{member_name}},\n\nYour member registration has been completed successfully.\n\nYour account is currently pending administrator approval. Please wait while the administrator reviews your application. You will receive another email once your membership has been approved.\n\nMember ID: {{member_id}}\n\nThank you,\n{{organization_name}}" ),
+            'admin_new_registration' => array( 'subject' => 'New member registration - {{member_name}}', 'body' => "A new member has registered and is awaiting review.\n\nName: {{member_name}}\nMember ID: {{member_id}}\nEmail: {{member_email}}\nMobile: {{member_mobile}}\nRegistration time: {{registration_time}}\nStatus: {{member_status}}\n\nReview member: {{review_member_url}}\n\n{{organization_name}}" ),
             'registration_approved' => array( 'subject' => 'Membership approved - {{organization_name}}', 'body' => "Hello {{member_name}},\n\nYour membership has been approved.\n\nMember ID: {{member_id}}\nDashboard: {{dashboard_url}}" ),
+            'status_pending' => array( 'subject' => 'Membership status changed to Pending - {{organization_name}}', 'body' => "Hello {{member_name}},\n\nYour membership status has been changed from {{old_status}} to {{new_status}}.\n\nYour account is currently pending administrator review.\n\nMember ID: {{member_id}}\n\n{{organization_name}}" ),
+            'status_inactive' => array( 'subject' => 'Membership status changed to Inactive - {{organization_name}}', 'body' => "Hello {{member_name}},\n\nYour membership status has been changed from {{old_status}} to {{new_status}}.\n\nYour member account is currently inactive. Please contact the organization if you need assistance.\n\nMember ID: {{member_id}}\n\n{{organization_name}}" ),
+            'status_suspended' => array( 'subject' => 'Membership status changed to Suspended - {{organization_name}}', 'body' => "Hello {{member_name}},\n\nYour membership status has been changed from {{old_status}} to {{new_status}}.\n\nYour member account is currently suspended. Please contact the organization for more information.\n\nMember ID: {{member_id}}\n\n{{organization_name}}" ),
+            'status_deleted' => array( 'subject' => 'Membership status changed to Deleted User - {{organization_name}}', 'body' => "Hello {{member_name}},\n\nYour membership status has been changed from {{old_status}} to {{new_status}}.\n\nYour MemberHub account has been marked as a deleted user. Historical financial records may still be retained by the organization.\n\nMember ID: {{member_id}}\n\n{{organization_name}}" ),
             'payment_reminder' => array( 'subject' => 'Membership fee reminder - {{organization_name}}', 'body' => "Hello {{member_name}},\n\nYou currently have {{due_months}} due month(s), totalling {{due_amount}}.\n\nPay securely without logging in: {{payment_link}}\n\nThis link expires on {{link_expiry}}." ),
             'payment_success' => array( 'subject' => 'Payment received - {{organization_name}}', 'body' => "Hello {{member_name}},\n\nWe received your payment of {{payment_amount}}.\nTransaction: {{transaction_id}}\nReceipt: {{receipt_url}}\n\nThank you." ),
         );
         $current = get_option( self::TEMPLATES_OPTION, array() );
-        update_option( self::TEMPLATES_OPTION, array_replace_recursive( $defaults, is_array( $current ) ? $current : array() ), false );
+        $current = is_array( $current ) ? $current : array();
+        $legacy_pending_subject = 'Registration received - {{organization_name}}';
+        $legacy_pending_body = "Hello {{member_name}},\n\nYour registration has been received and is awaiting approval.\n\nMember ID: {{member_id}}\n\n{{organization_name}}";
+        if ( isset( $current['registration_pending'] )
+            && ( $current['registration_pending']['subject'] ?? '' ) === $legacy_pending_subject
+            && ( $current['registration_pending']['body'] ?? '' ) === $legacy_pending_body ) {
+            unset( $current['registration_pending'] );
+        }
+        update_option( self::TEMPLATES_OPTION, array_replace_recursive( $defaults, $current ), false );
         $settings = wp_parse_args( get_option( self::SETTINGS_OPTION, array() ), array(
             'enabled' => 1, 'from_name' => get_bloginfo( 'name' ), 'from_email' => get_option( 'admin_email' ),
             'queue_batch' => 20, 'link_expiry_days' => 7, 'scheduled_enabled' => 0, 'reminder_day' => 5,
-            'minimum_due' => 0, 'last_scheduled_month' => '',
+            'reminder_days' => array( 5, 15, 25 ), 'reminder_last_day' => 0, 'minimum_reminder_gap' => 3,
+            'minimum_due' => 0, 'last_scheduled_month' => '', 'last_scheduled_date' => '',
+            'notify_member_registration' => 1, 'notify_admin_registration' => 1, 'notify_member_status_change' => 1,
+            'admin_notification_emails' => get_option( 'admin_email' ),
         ) );
         update_option( self::SETTINGS_OPTION, $settings, false );
         self::ensure_page();
@@ -70,7 +87,14 @@ final class BSXMH_Email_Automation {
             'link_expiry_days' => min( 90, max( 1, absint( $_POST['link_expiry_days'] ?? 7 ) ) ),
             'scheduled_enabled' => empty( $_POST['scheduled_enabled'] ) ? 0 : 1,
             'reminder_day' => min( 28, max( 1, absint( $_POST['reminder_day'] ?? 5 ) ) ),
+            'reminder_days' => self::sanitize_reminder_days( $_POST['reminder_days'] ?? array() ),
+            'reminder_last_day' => empty( $_POST['reminder_last_day'] ) ? 0 : 1,
+            'minimum_reminder_gap' => min( 31, max( 0, absint( $_POST['minimum_reminder_gap'] ?? 3 ) ) ),
             'minimum_due' => max( 0, (float) ( $_POST['minimum_due'] ?? 0 ) ),
+            'notify_member_registration' => empty( $_POST['notify_member_registration'] ) ? 0 : 1,
+            'notify_admin_registration' => empty( $_POST['notify_admin_registration'] ) ? 0 : 1,
+            'notify_member_status_change' => empty( $_POST['notify_member_status_change'] ) ? 0 : 1,
+            'admin_notification_emails' => self::sanitize_email_list( wp_unslash( $_POST['admin_notification_emails'] ?? '' ) ),
         ) );
         update_option( self::SETTINGS_OPTION, $settings, false );
         $templates = get_option( self::TEMPLATES_OPTION, array() );
@@ -94,9 +118,19 @@ final class BSXMH_Email_Automation {
         echo '<div class="bsxmh-panel"><form method="post" action="'.esc_url(admin_url('admin-post.php')).'"><input type="hidden" name="action" value="bsxmh_save_email_settings">'; wp_nonce_field('bsxmh_save_email_settings');
         echo '<h2>Delivery & Reminder Settings</h2><table class="form-table">';
         echo '<tr><th>Enable Email</th><td><label><input type="checkbox" name="enabled" value="1" '.checked(!empty($s['enabled']),true,false).'> Enable queue delivery through wp_mail()</label></td></tr>';
-        foreach(array('from_name'=>'From Name','from_email'=>'From Email','queue_batch'=>'Queue Batch Size','link_expiry_days'=>'Payment Link Expiry (days)','reminder_day'=>'Monthly Reminder Day','minimum_due'=>'Minimum Due Amount') as $k=>$l) echo '<tr><th>'.$l.'</th><td><input class="regular-text" name="'.$k.'" value="'.esc_attr($s[$k]??'').'"'.(in_array($k,array('queue_batch','link_expiry_days','reminder_day','minimum_due'),true)?' type="number" min="0"':'').'></td></tr>';
-        echo '<tr><th>Scheduled Reminder</th><td><label><input type="checkbox" name="scheduled_enabled" value="1" '.checked(!empty($s['scheduled_enabled']),true,false).'> Queue reminders automatically each month</label></td></tr></table>';
-        echo '<h2>Email Templates</h2><p>Variables: <code>{{member_name}}</code> <code>{{member_id}}</code> <code>{{organization_name}}</code> <code>{{due_months}}</code> <code>{{due_amount}}</code> <code>{{payment_link}}</code> <code>{{link_expiry}}</code> <code>{{payment_amount}}</code> <code>{{transaction_id}}</code> <code>{{receipt_url}}</code> <code>{{dashboard_url}}</code></p>';
+        foreach(array('from_name'=>'From Name','from_email'=>'From Email','queue_batch'=>'Queue Batch Size','link_expiry_days'=>'Payment Link Expiry (days)','minimum_due'=>'Minimum Due Amount') as $k=>$l) echo '<tr><th>'.$l.'</th><td><input class="regular-text" name="'.$k.'" value="'.esc_attr($s[$k]??'').'"'.(in_array($k,array('queue_batch','link_expiry_days','minimum_due'),true)?' type="number" min="0"':'').'></td></tr>';
+        $days = self::configured_reminder_days( $s );
+        echo '<tr><th>Reminder Days</th><td><div class="bsxmh-reminder-days">';
+        foreach ( range( 1, 28 ) as $day ) echo '<label style="display:inline-block;min-width:58px;margin:0 8px 8px 0"><input type="checkbox" name="reminder_days[]" value="'.absint($day).'" '.checked(in_array($day,$days,true),true,false).'> '.absint($day).'</label>';
+        echo '</div><label><input type="checkbox" name="reminder_last_day" value="1" '.checked(!empty($s['reminder_last_day']),true,false).'> Also send on the last day of each month</label><p class="description">Only active members who still have unpaid membership months are queued.</p></td></tr>';
+        echo '<tr><th>Minimum Days Between Reminders</th><td><input type="number" min="0" max="31" name="minimum_reminder_gap" value="'.esc_attr($s['minimum_reminder_gap']??3).'"><p class="description">Prevents repeated reminder emails to the same member within this many days. Use 0 to disable the protection.</p></td></tr>';
+        echo '<tr><th>Scheduled Reminder</th><td><label><input type="checkbox" name="scheduled_enabled" value="1" '.checked(!empty($s['scheduled_enabled']),true,false).'> Check the reminder schedule automatically every day</label></td></tr></table>';
+        echo '<h2>Registration Notifications</h2><table class="form-table">';
+        echo '<tr><th>Member Confirmation</th><td><label><input type="checkbox" name="notify_member_registration" value="1" '.checked(!empty($s['notify_member_registration']),true,false).'> Email the member after successful registration</label><p class="description">The message explains that the account is pending administrator approval and that another email will be sent after approval.</p></td></tr>';
+        echo '<tr><th>Admin Notification</th><td><label><input type="checkbox" name="notify_admin_registration" value="1" '.checked(!empty($s['notify_admin_registration']),true,false).'> Notify administrators when a new member registers</label></td></tr>';
+        echo '<tr><th>Admin Recipient Emails</th><td><textarea class="large-text" rows="3" name="admin_notification_emails">'.esc_textarea($s['admin_notification_emails']??get_option('admin_email')).'</textarea><p class="description">Enter one or more email addresses separated by commas or new lines. The WordPress Administration Email is used by default.</p></td></tr></table>';
+        echo '<h2>Member Status Notifications</h2><table class="form-table"><tr><th>Status Change Email</th><td><label><input type="checkbox" name="notify_member_status_change" value="1" '.checked(!empty($s['notify_member_status_change']),true,false).'> Email members whenever an administrator changes their status</label><p class="description">Sent only when the status actually changes. Updating other profile fields without changing status will not send an email.</p></td></tr></table>';
+        echo '<h2>Email Templates</h2><p>Variables: <code>{{member_name}}</code> <code>{{member_id}}</code> <code>{{member_email}}</code> <code>{{member_mobile}}</code> <code>{{member_status}}</code> <code>{{old_status}}</code> <code>{{new_status}}</code> <code>{{registration_time}}</code> <code>{{review_member_url}}</code> <code>{{organization_name}}</code> <code>{{due_months}}</code> <code>{{due_amount}}</code> <code>{{payment_link}}</code> <code>{{link_expiry}}</code> <code>{{payment_amount}}</code> <code>{{transaction_id}}</code> <code>{{receipt_url}}</code> <code>{{dashboard_url}}</code></p>';
         foreach($t as$key=>$template){echo '<div class="bsxmh-panel"><h3>'.esc_html(ucwords(str_replace('_',' ',$key))).'</h3><p><input class="large-text" name="templates['.esc_attr($key).'][subject]" value="'.esc_attr($template['subject']).'"></p><p><textarea class="large-text" rows="7" name="templates['.esc_attr($key).'][body]">'.esc_textarea($template['body']).'</textarea></p></div>';}
         submit_button('Save Email Automation'); echo '</form></div>';
         echo '<div class="bsxmh-panel"><h2>Bulk Due Reminder</h2><form method="post" action="'.esc_url(admin_url('admin-post.php')).'"><input type="hidden" name="action" value="bsxmh_queue_reminders">';wp_nonce_field('bsxmh_queue_reminders');echo '<p><label>Only members owing at least <input type="number" step="0.01" min="0" name="minimum_due" value="'.esc_attr($s['minimum_due']??0).'"></label></p>';submit_button('Queue Reminders for All Due Members','secondary');echo '</form></div></div>';
@@ -109,15 +143,61 @@ final class BSXMH_Email_Automation {
     }
 
     public static function scheduled_reminders(): void {
-        $s=get_option(self::SETTINGS_OPTION,array()); if(empty($s['enabled'])||empty($s['scheduled_enabled']))return;
-        $month=current_time('Y-m'); if(($s['last_scheduled_month']??'')===$month || (int)current_time('j') < (int)($s['reminder_day']??5))return;
-        self::queue_due_reminders((float)($s['minimum_due']??0)); $s['last_scheduled_month']=$month; update_option(self::SETTINGS_OPTION,$s,false);
+        $s = get_option( self::SETTINGS_OPTION, array() );
+        if ( empty( $s['enabled'] ) || empty( $s['scheduled_enabled'] ) ) return;
+        $today = current_time( 'Y-m-d' );
+        if ( ( $s['last_scheduled_date'] ?? '' ) === $today ) return;
+        $day = (int) current_time( 'j' );
+        $last_day = (int) current_time( 't' );
+        $days = self::configured_reminder_days( $s );
+        $is_scheduled = in_array( $day, $days, true ) || ( ! empty( $s['reminder_last_day'] ) && $day === $last_day );
+        if ( ! $is_scheduled ) return;
+        self::queue_due_reminders( (float) ( $s['minimum_due'] ?? 0 ), true );
+        $s['last_scheduled_date'] = $today;
+        $s['last_scheduled_month'] = current_time( 'Y-m' );
+        update_option( self::SETTINGS_OPTION, $s, false );
     }
 
-    private static function queue_due_reminders(float $minimum): int {
-        global $wpdb; $members=$wpdb->get_results("SELECT * FROM ".BSXMH_DB::table('members')." WHERE status='active' ORDER BY id ASC"); $count=0;
-        foreach($members as$m){$statement=BSXMH_Payments::statement($m);$due=(float)($statement['total_due']??0);if($due<=$minimum||empty($statement['due']))continue;$link=self::create_payment_link((int)$m->user_id,array_column($statement['due'],'key'));if(is_wp_error($link))continue;$vars=self::member_vars((int)$m->user_id);$vars['due_months']=(string)count($statement['due']);$vars['due_amount']=BSXMH_Payments::currency_symbol().number_format_i18n($due,2);$vars['payment_link']=$link['url'];$vars['link_expiry']=$link['expires'];if(self::queue('payment_reminder',(int)$m->user_id,$vars,(int)$link['id']))$count++;}
+    private static function queue_due_reminders( float $minimum, bool $respect_gap = false ): int {
+        global $wpdb;
+        $members = $wpdb->get_results( "SELECT * FROM " . BSXMH_DB::table( 'members' ) . " WHERE status='active' ORDER BY id ASC" );
+        $settings = get_option( self::SETTINGS_OPTION, array() );
+        $gap = $respect_gap ? max( 0, absint( $settings['minimum_reminder_gap'] ?? 3 ) ) : 0;
+        $count = 0;
+        foreach ( $members as $m ) {
+            $statement = BSXMH_Payments::statement( $m );
+            $due = (float) ( $statement['total_due'] ?? 0 );
+            if ( $due <= $minimum || empty( $statement['due'] ) ) continue;
+            if ( $gap && self::was_recently_reminded( (int) $m->user_id, $gap ) ) continue;
+            $link = self::create_payment_link( (int) $m->user_id, array_column( $statement['due'], 'key' ) );
+            if ( is_wp_error( $link ) ) continue;
+            $vars = self::member_vars( (int) $m->user_id );
+            $vars['due_months'] = (string) count( $statement['due'] );
+            $vars['due_amount'] = BSXMH_Payments::currency_symbol() . number_format_i18n( $due, 2 );
+            $vars['payment_link'] = $link['url'];
+            $vars['link_expiry'] = $link['expires'];
+            if ( self::queue( 'payment_reminder', (int) $m->user_id, $vars, (int) $link['id'] ) ) $count++;
+        }
         return $count;
+    }
+
+    private static function configured_reminder_days( array $settings ): array {
+        $days = $settings['reminder_days'] ?? array( absint( $settings['reminder_day'] ?? 5 ) );
+        return self::sanitize_reminder_days( $days );
+    }
+
+    private static function sanitize_reminder_days( $days ): array {
+        $clean = array();
+        foreach ( (array) $days as $day ) { $day = absint( $day ); if ( $day >= 1 && $day <= 28 ) $clean[$day] = $day; }
+        if ( ! $clean ) $clean[5] = 5;
+        ksort( $clean );
+        return array_values( $clean );
+    }
+
+    private static function was_recently_reminded( int $user_id, int $days ): bool {
+        global $wpdb;
+        $after = gmdate( 'Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ) );
+        return (bool) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . BSXMH_DB::table( 'email_logs' ) . " WHERE user_id=%d AND email_type='payment_reminder' AND status IN ('queued','processing','sent','retry') AND created_at >= %s ORDER BY id DESC LIMIT 1", $user_id, $after ) );
     }
 
     public static function create_payment_link(int $user_id,array $periods=array()): array|WP_Error {
@@ -140,7 +220,91 @@ final class BSXMH_Email_Automation {
 
     public static function mark_token_used(int $token_id): void { global $wpdb;$wpdb->update(BSXMH_DB::table('guest_tokens'),array('used_at'=>current_time('mysql',true)),array('id'=>$token_id)); }
 
-    public static function queue_template(string $type,int $user_id,array $vars=array(),int $related_id=0): bool { return self::queue($type,$user_id,array_merge(self::member_vars($user_id),$vars),$related_id); }
+    public static function handle_member_registered( int $user_id ): void {
+        $settings = wp_parse_args( get_option( self::SETTINGS_OPTION, array() ), array(
+            'notify_member_registration' => 1,
+            'notify_admin_registration'  => 1,
+            'admin_notification_emails'  => get_option( 'admin_email' ),
+        ) );
+        $vars = self::member_vars( $user_id );
+        $user = get_userdata( $user_id );
+        $member = BSXMH_Members::get_by_user( $user_id );
+        $vars['member_email'] = $user ? $user->user_email : '';
+        $vars['member_mobile'] = (string) get_user_meta( $user_id, 'bsxmh_phone', true );
+        $vars['member_status'] = $member ? ucfirst( (string) $member->status ) : 'Pending';
+        $vars['registration_time'] = wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), current_time( 'timestamp' ) );
+        $vars['review_member_url'] = $member ? admin_url( 'admin.php?page=bsxmh-members&action=edit&id=' . (int) $member->id ) : admin_url( 'admin.php?page=bsxmh-members' );
+
+        if ( ! empty( $settings['notify_member_registration'] ) ) {
+            self::queue_template( 'registration_pending', $user_id, $vars );
+        }
+        if ( ! empty( $settings['notify_admin_registration'] ) ) {
+            foreach ( self::email_list( (string) $settings['admin_notification_emails'] ) as $recipient ) {
+                self::queue_to( 'admin_new_registration', $recipient, $user_id, $vars );
+            }
+        }
+        self::schedule_queue();
+    }
+
+    private static function sanitize_email_list( string $raw ): string {
+        return implode( ', ', self::email_list( $raw ) );
+    }
+
+    private static function email_list( string $raw ): array {
+        $parts = preg_split( '/[\s,;]+/', $raw, -1, PREG_SPLIT_NO_EMPTY );
+        $emails = array();
+        foreach ( (array) $parts as $part ) {
+            $email = sanitize_email( $part );
+            if ( is_email( $email ) ) $emails[ strtolower( $email ) ] = $email;
+        }
+        if ( ! $emails ) {
+            $fallback = sanitize_email( get_option( 'admin_email' ) );
+            if ( is_email( $fallback ) ) $emails[ strtolower( $fallback ) ] = $fallback;
+        }
+        return array_values( $emails );
+    }
+
+    private static function queue_to( string $type, string $recipient, int $user_id, array $vars, int $related_id = 0 ): bool {
+        global $wpdb;
+        $templates = get_option( self::TEMPLATES_OPTION, array() );
+        if ( empty( $templates[ $type ] ) || ! is_email( $recipient ) ) return false;
+        $subject = self::replace( $templates[ $type ]['subject'], $vars );
+        $body = self::replace( $templates[ $type ]['body'], $vars );
+        return false !== $wpdb->insert( BSXMH_DB::table( 'email_logs' ), array(
+            'user_id' => $user_id ?: null,
+            'recipient' => $recipient,
+            'email_type' => $type,
+            'subject' => $subject,
+            'body' => $body,
+            'status' => 'queued',
+            'related_id' => $related_id ?: null,
+            'attempts' => 0,
+            'scheduled_at' => current_time( 'mysql' ),
+            'created_at' => current_time( 'mysql' ),
+        ) );
+    }
+
+    private static function schedule_queue(): void {
+        if ( ! wp_next_scheduled( 'bsxmh_process_email_queue' ) ) {
+            wp_schedule_single_event( time() + 5, 'bsxmh_process_email_queue' );
+        }
+    }
+
+
+    public static function handle_member_status_changed( int $user_id, string $old_status, string $new_status, int $member_id = 0 ): void {
+        $settings = get_option( self::SETTINGS_OPTION, array() );
+        if ( empty( $settings['notify_member_status_change'] ) || $old_status === $new_status ) return;
+        $labels = array( 'pending'=>'Pending', 'active'=>'Active', 'inactive'=>'Inactive', 'suspended'=>'Suspended', 'deleted'=>'Deleted User' );
+        $template = 'active' === $new_status ? 'registration_approved' : 'status_' . $new_status;
+        $vars = array(
+            'old_status' => $labels[ $old_status ] ?? ucfirst( $old_status ),
+            'new_status' => $labels[ $new_status ] ?? ucfirst( $new_status ),
+            'member_status' => $labels[ $new_status ] ?? ucfirst( $new_status ),
+        );
+        self::queue_template( $template, $user_id, $vars, $member_id );
+    }
+
+    public static function queue_template(string $type,int $user_id,array $vars=array(),int $related_id=0): bool { $queued=self::queue($type,$user_id,array_merge(self::member_vars($user_id),$vars),$related_id); if($queued)self::schedule_queue(); return $queued; }
     private static function queue(string $type,int $user_id,array $vars,int $related_id=0): bool { global $wpdb;$templates=get_option(self::TEMPLATES_OPTION,array());if(empty($templates[$type]))return false;$u=get_userdata($user_id);if(!$u||!is_email($u->user_email))return false;$subject=self::replace($templates[$type]['subject'],$vars);$body=self::replace($templates[$type]['body'],$vars);return false!==$wpdb->insert(BSXMH_DB::table('email_logs'),array('user_id'=>$user_id,'recipient'=>$u->user_email,'email_type'=>$type,'subject'=>$subject,'body'=>$body,'status'=>'queued','related_id'=>$related_id?:null,'attempts'=>0,'scheduled_at'=>current_time('mysql'),'created_at'=>current_time('mysql'))); }
     private static function replace(string $text,array $vars): string {foreach($vars as$k=>$v)$text=str_replace('{{'.$k.'}}',(string)$v,$text);return $text;}
     private static function member_vars(int $user_id): array {$u=get_userdata($user_id);$m=BSXMH_Members::get_by_user($user_id);$s=get_option('bsxmh_settings',array());$dash=!empty($s['dashboard_page_id'])?get_permalink((int)$s['dashboard_page_id']):home_url('/member-dashboard/');return array('member_name'=>$u?$u->display_name:'','member_id'=>$m?$m->member_number:'','organization_name'=>$s['organization_name']??get_bloginfo('name'),'dashboard_url'=>$dash);}

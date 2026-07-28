@@ -23,11 +23,36 @@ final class BSXMH_Contributions {
         }
         $membership_id = (int) $wpdb->get_var( "SELECT id FROM {$table} WHERE slug='membership' LIMIT 1" );
         if ( $membership_id ) {
+            $settings = get_option( 'bsxmh_settings', array() );
+            $configured = absint( $settings['default_membership_fund_id'] ?? 0 );
+            if ( ! $configured || ! self::get_fund( $configured ) ) {
+                $settings['default_membership_fund_id'] = $membership_id;
+                update_option( 'bsxmh_settings', $settings, false );
+            }
+            $wpdb->query( $wpdb->prepare(
+                "UPDATE " . BSXMH_DB::table( 'members' ) . " SET membership_fund_id=%d WHERE membership_fund_id IS NULL OR membership_fund_id=0",
+                absint( $settings['default_membership_fund_id'] ?? $membership_id )
+            ) );
             $wpdb->query( $wpdb->prepare(
                 "UPDATE " . BSXMH_DB::table( 'payment_items' ) . " SET fund_id=%d WHERE item_type='membership' AND (fund_id IS NULL OR fund_id=0)",
                 $membership_id
             ) );
         }
+    }
+
+    public static function default_membership_fund_id(): int {
+        $settings = get_option( 'bsxmh_settings', array() );
+        $id = absint( $settings['default_membership_fund_id'] ?? 0 );
+        $fund = $id ? self::get_fund( $id ) : null;
+        if ( $fund && 'active' === $fund->status ) return $id;
+        global $wpdb;
+        return (int) $wpdb->get_var( "SELECT id FROM " . BSXMH_DB::table( 'funds' ) . " WHERE slug='membership' AND status='active' LIMIT 1" );
+    }
+
+    public static function membership_fund_for_member( $member ): int {
+        $id = absint( is_object( $member ) ? ( $member->membership_fund_id ?? 0 ) : 0 );
+        $fund = $id ? self::get_fund( $id ) : null;
+        return ( $fund && 'active' === $fund->status ) ? $id : self::default_membership_fund_id();
     }
 
     public static function funds( bool $active_only = false ): array {

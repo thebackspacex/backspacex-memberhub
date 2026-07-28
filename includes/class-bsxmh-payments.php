@@ -31,14 +31,22 @@ final class BSXMH_Payments {
         return $months;
     }
 
-    public static function paid_month_keys( int $user_id ): array {
+    public static function paid_month_keys( int $user_id, int $member_id = 0 ): array {
         global $wpdb;
         $items = BSXMH_DB::table( 'payment_items' );
         $payments = BSXMH_DB::table( 'payments' );
-        $rows = $wpdb->get_results( $wpdb->prepare(
-            "SELECT i.period_year, i.period_month FROM {$items} i INNER JOIN {$payments} p ON p.id=i.payment_id WHERE p.user_id=%d AND p.status='paid' AND i.item_type='membership' AND i.period_year IS NOT NULL AND i.period_month IS NOT NULL",
-            $user_id
-        ) );
+        if ( $member_id > 0 ) {
+            $rows = $wpdb->get_results( $wpdb->prepare(
+                "SELECT i.period_year, i.period_month FROM {$items} i INNER JOIN {$payments} p ON p.id=i.payment_id WHERE (p.user_id=%d OR i.reference_id=%d) AND p.status='paid' AND p.payment_type='membership' AND i.item_type='membership' AND i.period_year IS NOT NULL AND i.period_month IS NOT NULL",
+                $user_id,
+                $member_id
+            ) );
+        } else {
+            $rows = $wpdb->get_results( $wpdb->prepare(
+                "SELECT i.period_year, i.period_month FROM {$items} i INNER JOIN {$payments} p ON p.id=i.payment_id WHERE p.user_id=%d AND p.status='paid' AND p.payment_type='membership' AND i.item_type='membership' AND i.period_year IS NOT NULL AND i.period_month IS NOT NULL",
+                $user_id
+            ) );
+        }
         $keys = array();
         foreach ( $rows as $row ) {
             $keys[] = sprintf( '%04d-%02d', (int) $row->period_year, (int) $row->period_month );
@@ -48,7 +56,7 @@ final class BSXMH_Payments {
 
     public static function statement( $member ): array {
         $eligible = self::eligible_months( $member );
-        $paid_keys = self::paid_month_keys( (int) $member->user_id );
+        $paid_keys = self::paid_month_keys( (int) $member->user_id, (int) $member->id );
         $paid = array();
         $due = array();
         foreach ( $eligible as $period ) {
@@ -68,7 +76,7 @@ final class BSXMH_Payments {
         }
         usort( $advance, static fn( $a, $b ) => strcmp( $a['key'], $b['key'] ) );
         $fee = (float) $member->monthly_fee;
-        $total_paid = self::member_total_paid( (int) $member->user_id );
+        $total_paid = self::member_total_paid( (int) $member->user_id, (int) $member->id );
         return array(
             'eligible' => $eligible,
             'paid' => $paid,
@@ -102,9 +110,18 @@ final class BSXMH_Payments {
         return self::statement( $member );
     }
 
-    public static function member_total_paid( int $user_id ): float {
+    public static function member_total_paid( int $user_id, int $member_id = 0 ): float {
         global $wpdb;
-        return (float) $wpdb->get_var( $wpdb->prepare( "SELECT COALESCE(SUM(total_amount),0) FROM " . BSXMH_DB::table( 'payments' ) . " WHERE user_id=%d AND status='paid' AND payment_type='membership'", $user_id ) );
+        $payments = BSXMH_DB::table( 'payments' );
+        if ( $member_id <= 0 ) {
+            return (float) $wpdb->get_var( $wpdb->prepare( "SELECT COALESCE(SUM(total_amount),0) FROM {$payments} WHERE user_id=%d AND status='paid' AND payment_type='membership'", $user_id ) );
+        }
+        $items = BSXMH_DB::table( 'payment_items' );
+        return (float) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COALESCE(SUM(x.total_amount),0) FROM (SELECT DISTINCT p.id,p.total_amount FROM {$payments} p LEFT JOIN {$items} i ON i.payment_id=p.id WHERE p.status='paid' AND p.payment_type='membership' AND (p.user_id=%d OR (i.item_type='membership' AND i.reference_id=%d))) x",
+            $user_id,
+            $member_id
+        ) );
     }
 
     public static function create_manual( array $data ) {
@@ -170,7 +187,7 @@ final class BSXMH_Payments {
             return new WP_Error( 'db_error', __( 'The payment could not be saved.', 'bsx-memberhub' ) );
         }
         $payment_id = (int) $wpdb->insert_id;
-        $membership_fund_id = (int) $wpdb->get_var( "SELECT id FROM " . BSXMH_DB::table( 'funds' ) . " WHERE slug='membership' LIMIT 1" );
+        $membership_fund_id = BSXMH_Contributions::membership_fund_for_member( $member );
         $base = floor( ( $amount / count( $valid_periods ) ) * 100 ) / 100;
         $remaining = $amount;
         foreach ( $valid_periods as $index => $period ) {

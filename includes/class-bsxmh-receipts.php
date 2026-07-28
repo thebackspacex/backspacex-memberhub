@@ -88,7 +88,18 @@ final class BSXMH_Receipts {
         echo '<h1>' . esc_html( $settings['receipt_title'] ?? 'Payment Receipt' ) . '</h1><h2>' . esc_html( $settings['organization_name'] ?? get_bloginfo( 'name' ) ) . '</h2>';
         if ( ! empty( $settings['receipt_header'] ) ) echo '<p>' . nl2br( esc_html( $settings['receipt_header'] ) ) . '</p>';
         echo '</div><div class="grid"><div class="row"><strong>Receipt Number</strong><br>' . esc_html( $receipt->receipt_number ) . '</div><div class="row"><strong>Status</strong><br><span class="' . ( 'valid' === $receipt->status ? 'valid' : 'invalid' ) . '">' . esc_html( ucfirst( $receipt->status ) ) . '</span></div>';
-        if ( ! $public ) echo '<div class="row"><strong>Member</strong><br>' . esc_html( $snap['member_name'] ?? '' ) . ' (' . esc_html( $snap['member_number'] ?? '' ) . ')</div>';
+        $member_name   = trim( (string) ( $snap['member_name'] ?? '' ) );
+        $member_number = trim( (string) ( $snap['member_number'] ?? '' ) );
+
+        // Receipts are verification documents, so the payer/member identity must
+        // remain visible on both admin printouts and public verification links.
+        if ( '' !== $member_name || '' !== $member_number ) {
+            $member_display = '' !== $member_name ? $member_name : __( 'Member', 'bsx-memberhub' );
+            if ( '' !== $member_number ) {
+                $member_display .= ' (' . $member_number . ')';
+            }
+            echo '<div class="row"><strong>' . esc_html__( 'Member', 'bsx-memberhub' ) . '</strong><br>' . esc_html( $member_display ) . '</div>';
+        }
         echo '<div class="row"><strong>Payment Date</strong><br>' . esc_html( $snap['payment_date'] ?? '' ) . '</div><div class="row"><strong>Details</strong><br>' . esc_html( implode( ', ', $snap['months'] ?? array() ) ) . '</div><div class="row"><strong>Payment Type</strong><br>' . esc_html( ucwords( str_replace( '_', ' ', $snap['payment_type'] ?? 'membership' ) ) ) . '</div><div class="row"><strong>Fund</strong><br>' . esc_html( implode( ', ', $snap['funds'] ?? array() ) ?: '—' ) . '</div><div class="row"><strong>Payment Method</strong><br>' . esc_html( $snap['method'] ?? '' ) . '</div><div class="row"><strong>Transaction</strong><br>' . esc_html( $snap['transaction_id'] ?? '' ) . '</div><div class="row"><strong>Amount</strong><br><span class="amount">' . esc_html( BSXMH_Payments::currency_symbol() . number_format_i18n( (float) ( $snap['amount'] ?? 0 ), 2 ) ) . '</span></div></div>';
         if ( ! empty( $settings['receipt_thank_you'] ) ) echo '<p style="text-align:center"><strong>' . esc_html( $settings['receipt_thank_you'] ) . '</strong></p>';
         if ( ! empty( $settings['receipt_footer'] ) ) echo '<hr><p>' . nl2br( esc_html( $settings['receipt_footer'] ) ) . '</p>';

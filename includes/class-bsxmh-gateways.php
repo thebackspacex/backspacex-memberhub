@@ -153,11 +153,11 @@ final class BSXMH_Gateways {
         if ( ! is_user_logged_in() ) return '<div class="bsxmh-notice">Please log in to pay membership fees.</div>';
         $member=BSXMH_Members::get_by_user(get_current_user_id()); if(!$member||'active'!==$member->status)return '<div class="bsxmh-notice">An active member profile is required.</div>';
         $months = self::membership_month_options( $member, 12 );
-        return self::render_form( 'membership', $months, array(), 0 );
+        return BSXMH_Portal::wrap_member_page( self::render_form( 'membership', $months, array(), 0 ), 'payment' );
     }
     public static function contribution_shortcode(): string {
         if(!is_user_logged_in())return '<div class="bsxmh-notice">Please log in to contribute.</div>';
-        return self::render_form('extra_contribution',array(),BSXMH_Contributions::funds(true),0);
+        return BSXMH_Portal::wrap_member_page( self::render_form('extra_contribution',array(),BSXMH_Contributions::funds(true),0), 'contribution' );
     }
     public static function event_shortcode( array $atts=array() ): string {
         $atts=shortcode_atts(array('id'=>0),$atts); return self::render_form('event_donation',array(),array(),absint($atts['id']));
@@ -235,40 +235,71 @@ final class BSXMH_Gateways {
     }
 
     private static function render_form(string $type,array $months,array $funds,int $event_id): string {
-        wp_enqueue_style('bsxmh-public'); $message='';
+        wp_enqueue_style( 'bsxmh-public' );
+        wp_enqueue_script( 'bsxmh-public' );
+        $message = '';
         if ( isset( $_GET['bsxmh_payment_error'] ) ) {
             $key = sanitize_key( wp_unslash( $_GET['bsxmh_payment_error'] ) );
             $error = get_transient( 'bsxmh_payment_error_' . $key );
             if ( $error ) { delete_transient( 'bsxmh_payment_error_' . $key ); $message .= '<div class="bsxmh-notice bsxmh-error">' . esc_html( $error ) . '</div>'; }
         }
-        if ( isset( $_GET['bsxmh_payment_result'] ) ) { $r=sanitize_key($_GET['bsxmh_payment_result']); $labels=array('success'=>'Payment verified successfully. Your receipt is now available.','failed'=>'Payment failed or could not be verified.','cancel'=>'Payment was cancelled.','processing'=>'Payment is under risk review.'); if(isset($labels[$r]))$message='<div class="bsxmh-notice '.('success'===$r?'bsxmh-success':'bsxmh-error').'">'.esc_html($labels[$r]).'</div>'.$message; }
+        if ( isset( $_GET['bsxmh_payment_result'] ) ) {
+            $r = sanitize_key( $_GET['bsxmh_payment_result'] );
+            $labels = array( 'success'=>'Payment verified successfully. Your receipt is now available.', 'failed'=>'Payment failed or could not be verified.', 'cancel'=>'Payment was cancelled.', 'processing'=>'Payment is under risk review.' );
+            if ( isset( $labels[ $r ] ) ) $message = '<div class="bsxmh-notice ' . ( 'success' === $r ? 'bsxmh-success' : 'bsxmh-error' ) . '">' . esc_html( $labels[ $r ] ) . '</div>' . $message;
+        }
         $return_url = get_permalink() ?: home_url( '/' );
-        ob_start(); echo $message; echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" class="bsxmh-form">';wp_nonce_field('bsxmh_online_payment','bsxmh_online_nonce');echo '<input type="hidden" name="action" value="bsxmh_start_online_payment"><input type="hidden" name="bsxmh_return_url" value="'.esc_url($return_url).'"><input type="hidden" name="bsxmh_online_type" value="'.esc_attr($type).'">';
+        $selected_periods = array();
+        $member = is_user_logged_in() ? BSXMH_Members::get_by_user( get_current_user_id() ) : null;
         if ( 'membership' === $type ) {
-            echo '<h3>Pay Membership Fee</h3><div class="bsxmh-payment-months"><span class="bsxmh-field-label">Select Months</span>';
+            $requested = sanitize_text_field( wp_unslash( $_GET['bsxmh_pay_month'] ?? '' ) );
+            if ( preg_match( '/^\d{4}-(0[1-9]|1[0-2])$/', $requested ) ) $selected_periods[ $requested ] = true;
+            if ( ! empty( $_GET['bsxmh_pay_all_due'] ) && $member ) {
+                $statement = BSXMH_Payments::statement( $member );
+                foreach ( (array) $statement['due'] as $due_period ) $selected_periods[ sprintf( '%04d-%02d', (int) $due_period['year'], (int) $due_period['month'] ) ] = true;
+            }
+        }
+        $titles = array(
+            'membership' => array( 'Membership Fees', 'Select one or more unpaid months and complete your payment securely.', '৳' ),
+            'extra_contribution' => array( 'Make a Contribution', 'Support an active fund with a secure online contribution.', '♥' ),
+            'event_donation' => array( 'Support This Event', 'Choose an amount and complete your event contribution securely.', '◇' ),
+        );
+        $title = $titles[ $type ];
+        ob_start();
+        echo $message;
+        echo '<section class="bsxmh-page-hero"><div class="bsxmh-page-icon" aria-hidden="true">' . esc_html( $title[2] ) . '</div><div><p class="bsxmh-eyebrow">Member Portal</p><h2>' . esc_html( $title[0] ) . '</h2><p>' . esc_html( $title[1] ) . '</p></div></section>';
+        echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" class="bsxmh-form bsxmh-portal-form bsxmh-modern-payment-form" data-monthly-fee="' . esc_attr( $member ? (float) $member->monthly_fee : 0 ) . '">';
+        wp_nonce_field( 'bsxmh_online_payment', 'bsxmh_online_nonce' );
+        echo '<input type="hidden" name="action" value="bsxmh_start_online_payment"><input type="hidden" name="bsxmh_return_url" value="' . esc_url( $return_url ) . '"><input type="hidden" name="bsxmh_online_type" value="' . esc_attr( $type ) . '">';
+        if ( 'membership' === $type ) {
+            $due_count = count( array_filter( $months, static fn( $m ) => empty( $m['paid'] ) ) );
+            echo '<div class="bsxmh-payment-overview"><div><span>Outstanding months</span><strong>' . esc_html( number_format_i18n( $due_count ) ) . '</strong></div><div><span>Monthly fee</span><strong>' . esc_html( BSXMH_Payments::currency_symbol() . number_format_i18n( $member ? (float) $member->monthly_fee : 0, 2 ) ) . '</strong></div><div><span>Selected total</span><strong data-bsxmh-selected-total>' . esc_html( BSXMH_Payments::currency_symbol() . '0.00' ) . '</strong></div></div>';
+            echo '<div class="bsxmh-form-section"><div class="bsxmh-section-heading"><div><h3>Select months</h3><p>Paid months stay visible but cannot be selected again.</p></div><button type="button" class="bsxmh-text-button" data-bsxmh-select-unpaid>Select all unpaid</button></div><div class="bsxmh-payment-months">';
             foreach ( $months as $m ) {
-                $key     = sprintf( '%04d-%02d', (int) $m['year'], (int) $m['month'] );
+                $key = sprintf( '%04d-%02d', (int) $m['year'], (int) $m['month'] );
                 $is_paid = ! empty( $m['paid'] );
                 $classes = 'bsxmh-payment-month' . ( $is_paid ? ' is-paid' : '' );
-                echo '<label class="' . esc_attr( $classes ) . '">';
-                echo '<span class="bsxmh-payment-month-name">' . esc_html( BSXMH_Payments::month_label( (int) $m['year'], (int) $m['month'] ) ) . '</span>';
-                echo '<span class="bsxmh-payment-month-control"><input type="checkbox" name="periods[]" value="' . esc_attr( $key ) . '"' . disabled( $is_paid, true, false ) . ' aria-label="' . esc_attr( $is_paid ? 'Already paid' : 'Select ' . BSXMH_Payments::month_label( (int) $m['year'], (int) $m['month'] ) ) . '">';
-                if ( $is_paid ) {
-                    echo '<span class="bsxmh-paid-badge">Paid ✓</span>';
-                }
-                echo '</span></label>';
+                $is_selected = ! $is_paid && isset( $selected_periods[ $key ] );
+                echo '<label class="' . esc_attr( $classes ) . '"><span class="bsxmh-month-check"><input type="checkbox" name="periods[]" value="' . esc_attr( $key ) . '"' . checked( $is_selected, true, false ) . disabled( $is_paid, true, false ) . '><i aria-hidden="true"></i></span><span class="bsxmh-payment-month-name">' . esc_html( BSXMH_Payments::month_label( (int) $m['year'], (int) $m['month'] ) ) . '</span><span class="bsxmh-payment-month-control">' . ( $is_paid ? '<span class="bsxmh-paid-badge">Paid</span>' : '<span class="bsxmh-due-badge">Due</span>' ) . '</span></label>';
             }
-            echo '<p class="bsxmh-payment-help">Already-paid months are locked automatically. Use Contribution for any additional amount.</p></div>';
+            echo '</div></div>';
+        } elseif ( 'extra_contribution' === $type ) {
+            echo '<div class="bsxmh-form-section"><div class="bsxmh-section-heading"><div><h3>Contribution details</h3><p>Choose the fund and enter the amount you would like to contribute.</p></div></div><div class="bsxmh-modern-fields"><div><label>Fund</label><select name="fund_id" required><option value="">Choose a fund</option>';
+            foreach ( $funds as $f ) echo '<option value="' . absint( $f->id ) . '">' . esc_html( $f->name ) . '</option>';
+            echo '</select></div><div><label>Amount</label><input type="number" step="0.01" min="1" name="amount" data-bsxmh-amount required></div></div><div class="bsxmh-amount-presets" aria-label="Suggested amounts"><button type="button" data-amount="100">৳100</button><button type="button" data-amount="500">৳500</button><button type="button" data-amount="1000">৳1,000</button><button type="button" data-amount="5000">৳5,000</button></div></div>';
+        } else {
+            echo '<div class="bsxmh-form-section"><div class="bsxmh-section-heading"><div><h3>Donation details</h3><p>Your contribution will be recorded against this event.</p></div></div><input type="hidden" name="event_id" value="' . esc_attr( $event_id ) . '"><div class="bsxmh-modern-fields"><div><label>Amount</label><input type="number" step="0.01" min="1" name="amount" data-bsxmh-amount required></div>';
+            if ( ! is_user_logged_in() ) echo '<div><label>Name</label><input name="guest_name" required></div><div><label>Email</label><input type="email" name="guest_email" required></div><div><label>Mobile</label><input name="guest_phone" required></div>';
+            echo '</div><div class="bsxmh-amount-presets"><button type="button" data-amount="100">৳100</button><button type="button" data-amount="500">৳500</button><button type="button" data-amount="1000">৳1,000</button><button type="button" data-amount="5000">৳5,000</button></div></div>';
         }
-        elseif('extra_contribution'===$type){echo '<h3>Extra Contribution</h3><div><label>Fund</label><select name="fund_id" required><option value="">Choose fund</option>';foreach($funds as$f)echo '<option value="'.$f->id.'">'.esc_html($f->name).'</option>';echo '</select></div><div><label>Amount</label><input type="number" step="0.01" min="1" name="amount" required></div>';}
-        else{echo '<h3>Event Donation</h3><input type="hidden" name="event_id" value="'.esc_attr($event_id).'"><div><label>Amount</label><input type="number" step="0.01" min="1" name="amount" required></div>';if(!is_user_logged_in())echo '<div><label>Name</label><input name="guest_name" required></div><div><label>Email</label><input type="email" name="guest_email" required></div><div><label>Mobile</label><input name="guest_phone" required></div>';}
-        echo '<button type="submit">Pay with SSLCOMMERZ</button></form>';return (string)ob_get_clean();
+        echo '<div class="bsxmh-checkout-bar"><div><small>Secure checkout</small><strong>SSLCOMMERZ</strong></div><button type="submit">Continue to Payment <span aria-hidden="true">→</span></button></div></form>';
+        return (string) ob_get_clean();
     }
 
     private static function start_payment(string $type,array $data): string|WP_Error {
         global $wpdb; $gateway=new BSXMH_Gateway_SSLCommerz(); if(!$gateway->is_enabled())return new WP_Error('disabled','Online payment is currently unavailable.');
         $user_id=get_current_user_id()?:null;$amount=0;$items=array();$product='MemberHub Payment';
-        if('membership'===$type){$member=BSXMH_Members::get_by_user((int)$user_id);if(!$member)return new WP_Error('member','Member not found.');$periods=array_values(array_unique(array_map('sanitize_text_field',(array)($data['periods']??array()))));$paid=BSXMH_Payments::paid_month_keys((int)$user_id);foreach($periods as$p){if(!preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/',$p,$m)||in_array($p,$paid,true))continue;$items[]=array('type'=>'membership','reference'=>(int)$member->id,'year'=>(int)$m[1],'month'=>(int)$m[2],'description'=>BSXMH_Payments::month_label((int)$m[1],(int)$m[2]),'amount'=>(float)$member->monthly_fee,'fund'=>self::fund_id('membership'));$amount+=(float)$member->monthly_fee;}if(!$items)return new WP_Error('months','Select at least one unpaid month.');$product='Membership Fee';}
+        if('membership'===$type){$member=BSXMH_Members::get_by_user((int)$user_id);if(!$member)return new WP_Error('member','Member not found.');$periods=array_values(array_unique(array_map('sanitize_text_field',(array)($data['periods']??array()))));$paid=BSXMH_Payments::paid_month_keys((int)$user_id);foreach($periods as$p){if(!preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/',$p,$m)||in_array($p,$paid,true))continue;$items[]=array('type'=>'membership','reference'=>(int)$member->id,'year'=>(int)$m[1],'month'=>(int)$m[2],'description'=>BSXMH_Payments::month_label((int)$m[1],(int)$m[2]),'amount'=>(float)$member->monthly_fee,'fund'=>BSXMH_Contributions::membership_fund_for_member($member));$amount+=(float)$member->monthly_fee;}if(!$items)return new WP_Error('months','Select at least one unpaid month.');$product='Membership Fee';}
         elseif('extra_contribution'===$type){$amount=max(0,(float)($data['amount']??0));$fund=BSXMH_Contributions::get_fund(absint($data['fund_id']??0));if(!$fund||'active'!==$fund->status||$amount<=0)return new WP_Error('invalid','Choose an active fund and valid amount.');$items[]=array('type'=>'extra_contribution','reference'=>(int)$fund->id,'description'=>$fund->name,'amount'=>$amount,'fund'=>(int)$fund->id);$product='Extra Contribution';}
         else{$amount=max(0,(float)($data['amount']??0));$event=BSXMH_Events::get(absint($data['event_id']??0));if(!$event||'active'!==$event->status||$amount<=0)return new WP_Error('event','Active event and valid amount are required.');$items[]=array('type'=>'event_donation','reference'=>(int)$event->id,'description'=>$event->title,'amount'=>$amount,'fund'=>(int)$event->fund_id);$product=$event->title;}
         $tran=BSXMH_Payments::transaction_id();$now=current_time('mysql');$meta=array('method'=>'sslcommerz','source'=>'frontend','guest_name'=>sanitize_text_field($data['guest_name']??''),'guest_email'=>sanitize_email($data['guest_email']??''),'guest_phone'=>sanitize_text_field($data['guest_phone']??''),'guest_token_id'=>absint($data['bsxmh_guest_token_id']??0));
